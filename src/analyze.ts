@@ -9,14 +9,18 @@ import { checkPromises } from './checks/promises.js';
 import { fetchTransfers } from './sources/logs.js';
 import { fetchSite } from './sources/website.js';
 import { launchMeta, type LaunchMeta } from './sources/launch.js';
-import { client, currentChain, withBackoff, type ChainKey } from './sources/rpc.js';
+import { background, client, currentChain, withBackoff, type ChainKey } from './sources/rpc.js';
+
+/** Background checks only spend an AI call on launches with at least this many holders. */
+const AI_MIN_HOLDERS = Number(process.env.AI_MIN_HOLDERS) || 10;
 import type { Check, TokenInfo } from './checks/types.js';
 import { getPair, getTokenPairs, type DexPair } from './sources/dexscreener.js';
 import { buildFlow, type FlowGraph } from './flow.js';
 import { config } from './config.js';
-import { knownAsset, tellIdentity } from './known.js';
+import { knownAsset, stockImpostor, tellIdentity } from './known.js';
 import { score, type Score } from './scoring.js';
 import { strictChecks } from './checks/strict.js';
+import { honeypotOf } from './sources/gecko.js';
 import { launchOf } from './launches.js';
 import { overallRugPct } from './accuracy.js';
 
@@ -112,12 +116,22 @@ export async function analyze(address: `0x${string}`): Promise<Report> {
     ...checkSite(token, site),
   ];
 
+  // honeypot: can a buyer sell? (GeckoTerminal's simulation; Robinhood Chain only, unknown = no finding)
+  if (currentChain().key === 'robinhood' && ownPairs.length && !knownAsset(address)) {
+    const hp = await honeypotOf(address);
+    if (hp === true) checks.unshift({ group: 'contract', status: 'bad', title: "Honeypot: buyers can't sell", detail: 'flagged by GeckoTerminal\'s sell simulation', risk: 100, critical: true });
+    else if (hp === false) checks.push({ group: 'contract', status: 'ok', title: 'Not a honeypot: selling works', risk: 0 });
+  }
   applyIdentity(token, checks);
   checks.push(...await checkPromises(token, site, onchain.burnedPct));
 
   // The AI reads the site and sees every other finding, so it runs last.
-  const review = await aiReview(token, checks, site, meta?.description);
-  checks.push(...aiChecks(review, site, checks));
+  // AI costs money per call: background checks of launches nobody holds skip it (rules still run);
+  // anything a person asks for, or a launch with real holders, still gets the full read
+  const worthAi = !background.getStore() || (onchain.facts.holders ?? 0) >= AI_MIN_HOLDERS;
+  const review = worthAi ? await aiReview(token, checks, site, meta?.description) : undefined;
+  if (worthAi) checks.push(...aiChecks(review, site, checks));
+  else checks.push({ group: 'website', status: 'info', title: 'AI read of the site: skipped for now', detail: 'the token has almost no holders; check it on tell.markets for the full read', risk: 0 });
   if (!knownAsset(address)) checks.push(...strictChecks(checks, tokenAge(address, ownPairs), overallRugPct(), currentChain().name));
 
   return {
@@ -150,6 +164,17 @@ export function applyIdentity(token: TokenInfo, checks: Check[]) {
     checks.unshift({
       group: 'contract', status: 'bad', title: 'Uses the Elysium name: Elysium has no token',
       detail: 'Kinetiq says there is no Elysium token and no points program, so this one is not official', risk: 80, critical: true,
+    });
+  }
+
+  // Robinhood Chain's own stock tokens are the most copied tickers there
+  const stock = currentChain().key === 'robinhood' ? stockImpostor(token.address, token.name, token.symbol) : undefined;
+  if (stock) {
+    const what = stock.sym === 'a stock' ? 'name' : `$${stock.sym} ticker`;
+    checks.unshift({
+      group: 'contract', status: 'bad', title: `Borrows the ${what} of an official Robinhood stock token`,
+      detail: stock.address ? `the real ${stock.sym} token is ${stock.address.slice(0, 6)}…${stock.address.slice(-4)}; this one is not it` : 'it calls itself a Robinhood Token but is not one of the official stock tokens',
+      risk: 80, critical: true,
     });
   }
 

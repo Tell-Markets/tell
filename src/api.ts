@@ -12,6 +12,7 @@ import { accuracyRows, accuracySummary, rugRows, rugSummary } from './accuracy.j
 import { recentCheckMs } from './reports.js';
 import { paymentResponseHeader, paymentsEnabled, readPayment, requirements, revenue, sendPaymentRequired, settlePayment, USDG, verifyPayment } from './x402.js';
 import { currentChain, onChain, pickChain } from './sources/rpc.js';
+import { badgeSvg } from './badge.js';
 
 /*
  * Public API for agents and apps: /api/v1/*. JSON in, JSON out, CORS open.
@@ -59,6 +60,16 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
   if (!path.startsWith('/api/v1')) return false;
   cors(res);
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return true; }
+
+  // badges load on every view of the page that embeds them, so they skip the per-caller limit
+  const bm = path.match(/^\/api\/v1\/badge\/(0x[a-fA-F0-9]{40})(?:\.svg)?$/);
+  if (bm) {
+    const chain = await pickChain(url.searchParams.get('chain'), bm[1], bm[1] as `0x${string}`);
+    const { svg, scored } = onChain(chain, () => badgeSvg(bm[1].toLowerCase() as `0x${string}`));
+    res.writeHead(200, { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': `public, max-age=${scored ? 300 : 30}` });
+    res.end(svg);
+    return true;
+  }
 
   const who = keyFrom(req)?.key ?? clientIp(req);
   if (!allow(who)) { json(res, 429, { error: 'Too many requests. Slow down to 60 a minute.' }); return true; }
@@ -211,6 +222,7 @@ function index(base: string) {
       'GET /api/v1/check?token=0x…&mode=quick|full': 'risk check of one token',
       'GET /api/v1/compare?a=0x…&b=0x…': 'two tokens side by side',
       'GET /api/v1/launches?limit=50&maxRisk=100': 'Pons launches of the last 24h with scores',
+      'GET /api/v1/badge/0x….svg': 'embeddable SVG risk badge (last score on file; ?chain=elysium for Elysium)',
       'GET /api/v1/pricing': 'what is free and what costs USDG',
       'GET /api/v1/proof': 'verdict ledger and x402 revenue',
       'GET /api/v1/proof/0x…': 'recorded verdicts for one token with Merkle proofs',
@@ -232,6 +244,7 @@ function openapi(base: string) {
     paths: {
       '/api/v1/check': { get: { summary: 'Check a token', parameters: [token, { name: 'mode', in: 'query', schema: { type: 'string', enum: ['quick', 'full'], default: 'quick' } }], responses: { 200: { description: 'Risk summary' }, 402: { description: 'x402 payment required (full mode)' } } } },
       '/api/v1/compare': { get: { summary: 'Compare two tokens', parameters: [{ name: 'a', in: 'query', required: true, schema: { type: 'string' } }, { name: 'b', in: 'query', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'Both summaries' } } } },
+      '/api/v1/badge/{address}': { get: { summary: 'SVG risk badge for embedding', parameters: [{ name: 'address', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'image/svg+xml' } } } },
       '/api/v1/launches': { get: { summary: 'Recent Pons launches', parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer', default: 50 } }, { name: 'maxRisk', in: 'query', schema: { type: 'integer', default: 100 } }], responses: { 200: { description: 'Launch list' } } } },
       '/api/v1/pricing': { get: { summary: 'Pricing', responses: { 200: { description: 'Pricing' } } } },
       '/api/v1/proof': { get: { summary: 'Verdict ledger', responses: { 200: { description: 'Batches, roots, tx hashes, revenue' } } } },

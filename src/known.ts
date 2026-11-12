@@ -1,4 +1,8 @@
+import { createRequire } from 'node:module';
 import { config } from './config.js';
+
+/** Official tokenized stocks on Robinhood Chain ("<Company> • Robinhood Token"), by address. */
+export const STOCK_TOKENS = createRequire(import.meta.url)('./stock-tokens.json') as { sym: string; name: string; address: string }[];
 
 // Established assets that legitimately keep owner powers (minting, pausing, upgrades). Matched
 // by address only: names are free to copy, so "• Robinhood Token" in a name proves nothing.
@@ -12,7 +16,26 @@ export const KNOWN_ASSETS: Record<string, string> = {
   '0x4a0e65a3eccec6dbe60ae065f2e7bb85fae35eea': 'Robinhood stock token: SPCX',
 };
 
+for (const st of STOCK_TOKENS) KNOWN_ASSETS[st.address] ??= `Robinhood stock token: ${st.sym}`;
+
 export const knownAsset = (address: string) => KNOWN_ASSETS[address.toLowerCase()];
+
+const STOCK_BY_SYM = new Map(STOCK_TOKENS.map(st => [st.sym, st]));
+/**
+ * A token that takes the ticker of an official Robinhood stock token (or calls itself a "Robinhood
+ * Token") without being one. Buyers searching "NVDA" on a launchpad can land on it by mistake.
+ */
+export function stockImpostor(address: string, name?: string, symbol?: string): { sym: string; address: string } | undefined {
+  if (KNOWN_ASSETS[address.toLowerCase()]) return undefined;
+  const sym = (symbol ?? '').trim().toUpperCase().replace(/^\$/, '');
+  const hit = STOCK_BY_SYM.get(sym);
+  if (hit) return { sym: hit.sym, address: hit.address };
+  if (/robinhood\s*token/i.test(name ?? '')) {
+    const byName = STOCK_TOKENS.find(st => (name ?? '').toLowerCase().includes(st.name.toLowerCase()));
+    return byName ? { sym: byName.sym, address: byName.address } : { sym: 'a stock', address: '' };
+  }
+  return undefined;
+}
 
 const norm = (s?: string) => (s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
